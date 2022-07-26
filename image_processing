@@ -1,0 +1,242 @@
+% MATLAB video processing:
+% Author: Chad ten Pas
+% Description: This script processes a folder of images and finds the meniscus height
+% relative to a reference length in each image. It uses a canny edge
+% detection that is tunable to find edges. The images are then cropped down
+% to reduce data. The centroid is calculated and converted to height data.
+% Uploaded by Roger Wang (rq.wang@rutgers.edu)
+ 
+% Update: 
+% (07/21/2021) Added scripting to find the initial height before pressure
+% application.
+%              Added pressure processing
+% (08/29/2021) Added automation to select reference for pixel conversions and
+% processing data.
+ 
+clc,close all, clear all
+ 
+filePath = 'C:\Users\chadt\Desktop\fullPDMSchip\1000um\single outlet\800mbar\';
+[~,appliedPressure,~] = fileparts(fileparts(filePath));
+[~,chipGeometry,~] = fileparts(fileparts(fileparts(fileparts(filePath))));
+baseDirectory = pwd;
+heightFilePath = [filePath 'initialLiquidHeight\initialLiquidHeight.png'];
+tic
+[images,time] = readImagesToCell(filePath);
+[pressure,Ptime] = readPressureToArray(filePath);
+if sum(time~=Ptime) < 1
+    clear Ptime
+    %delete this later
+    fprintf('Both time vectors are identical!\n\n')
+    heightImage = imread(heightFilePath);
+    [actualLiquidHeight,angleRotated] = imageProcess(heightImage,images);
+    smoothedLiquidHeight = smooth(actualLiquidHeight,'moving');
+    relativeTime = seconds(time - time(1));
+    
+    fig1 = figure('Position',[60,460,2400,600]);
+    set(fig1,'defaultAxesColorOrder',[0,0,0;0,0.4470,0.7410])
+    set(gca,'TickLabelInterpreter','latex','FontSize',14)
+    set(0,'defaulttextInterpreter','latex');
+    yyaxis left
+    plot(relativeTime,pressure)
+    ytl = get(gca, 'YTick'); % Get Controlling Left Ticks
+    ylabel('Pressure (mbar)','FontSize',16,'rotation',0,'HorizontalAlignment','right')
+    yyaxis right
+    set(0,'defaulttextInterpreter','latex');
+    plot(relativeTime,smoothedLiquidHeight,'LineWidth',1.25)
+    ytr = get(gca, 'YTick'); % Get Right Tick Values
+    ytrv = linspace(min(ytr), max(ytr), numel(ytl)); % Create New Right Tick Values Matching Number Of Left Ticks
+    ytrc = compose('%.0f',ytrv); % Tick Label Cell Array
+    set(gca, 'YTick',ytrv, 'YTickLabel',ytrc)
+    grid on, grid minor
+    ylabel('Meniscus displacement ($\mu$m)','FontSize',16,'rotation',0,'HorizontalAlignment','left')
+    xlabel('time (s)','FontSize',16)
+    title([chipGeometry, ' thin wall subject to ',appliedPressure],'FontSize',22)
+ 
+    savefig(fig1,[baseDirectory,'/processed/',chipGeometry,'_',appliedPressure,'.fig']); 
+    hgexport(fig1,[baseDirectory,'/processed/',chipGeometry,'_',appliedPressure,'.png'],hgexport('factorystyle'), 'Format', 'png')
+    save([baseDirectory,'/processed/',chipGeometry,'_',appliedPressure,'.mat'],'relativeTime','pressure','actualLiquidHeight','smoothedLiquidHeight')
+else
+    fprintf('There is an inconsistancy in your time vectors, please resolve.\n\n')
+end
+toc
+ 
+% FUNCTIONS
+function [imagesCell,timeArray] = readImagesToCell(filePath)
+%% Reads *.PNG images from a folder directory and puts them into a cell array.
+% Inputs:
+%   filePath = the folder directory of the *.PNG images. In the
+%   format of 'C:\*\Folder\'
+% Outputs:
+%   imagesCell = all the images placed in a cell array.
+%   timeArray = vector of time when the images were created.
+ 
+imageFiles = dir([filePath '*.png']);
+nFiles = length(imageFiles);    % Number of files found
+for i = 1 : nFiles
+    currentFilename = imageFiles(i).name;
+    temp = currentFilename(5:27);
+    timeArray(i) = datetime(temp,'InputFormat','yyyy-MM-dd HH-mm-ss.SSS','Format','yyyy-MM-dd HH-mm-ss.SSS');
+    currentImage = imread([filePath currentFilename]);
+    imagesCell{i} = currentImage;
+end
+imagesCell = imagesCell';
+timeArray =  timeArray';
+end
+ 
+function [pressureArray,PtimeArray] = readPressureToArray(filePath)
+%% Reads the pressure & time data from a folder directory and puts them into a array.
+% Inputs:
+%   filePath = the folder directory with the . In the
+%   format of 'C:\*\Folder\'
+% Outputs:
+%   PressureArray = vector of pressure data.
+%   PtimeArray = vector of time corresponding to pressure data.
+pressureFile = [filePath 'press_data'];
+tempTable = readtable(pressureFile);
+pressureArray = tempTable{:,1};
+PtimeArray = datetime(tempTable{:,2},'InputFormat','yyyy-MM-dd_HH-mm-ss.SSS','Format','yyyy-MM-dd_HH-mm-ss.SSS');
+end
+ 
+function [actualLiquidHeight,angleRotated] = imageProcess(heightImage,theImages)
+initialLiquidHeight = getInitialLiquidHeight(heightImage,2000);
+[edgeImages] = edgeImageCell(theImages);
+[angleRotated,rotatedImages] = autoRotateImageCell(edgeImages);
+pixelConversionFactor = getPixelConversion(rotatedImages{1},2000);
+[~,croppedImages] = autoCropImageCell(rotatedImages);
+pixelHeight = getPixelHeight(croppedImages);
+actualLiquidHeight = pixelHeight * pixelConversionFactor + initialLiquidHeight;
+end
+ 
+%% Functions
+function initialLiquidHeight = getInitialLiquidHeight(heightImage,knownReferenceDistance)
+ 
+t1 = edge(heightImage,'Canny',[.1 .4]);
+fig1 = figure('Name','getInitialLiquidHeight: Select the bottom of the chip.','NumberTitle','off');
+[bottom,bottomrect] = imcrop(t1);
+close(fig1)
+fig1 = figure('Name','getInitialLiquidHeight: Select the meniscus.','NumberTitle','off');
+[top,toprect] = imcrop(t1);
+close(fig1)
+ 
+props = regionprops(true(size(bottom)),bottom, 'WeightedCentroid');
+bottomLoc = bottomrect(2) + props.WeightedCentroid(2);
+ 
+props = regionprops(true(size(top)),top, 'WeightedCentroid');
+topLoc = toprect(2) + props.WeightedCentroid(2);
+ 
+pixelHeight = bottomLoc - topLoc;
+ 
+% get the conversion to calculate actual height
+fig1 = figure('Name','getInitialLiquidHeight(getPixelConversion): Select left line to analyze (first line going from left will be used).','NumberTitle','off');
+[~,leftrect] = imcrop(t1);
+close(fig1)
+ 
+fig1 = figure('Name','getInitialLiquidHeight(getPixelConversion): Select right line area to analyze (first line going from left will be used).','NumberTitle','off');
+[~,rightrect] = imcrop(t1);
+close(fig1)
+leftrect = round(leftrect);
+rightrect = round(rightrect);
+leftline = imcrop(t1,leftrect);
+rightline = imcrop(t1,rightrect);
+[~,leftInd] = find(leftline(1,:)~=0);
+[~,rightInd] = find(rightline(1,:)~=0);
+rightPixel = rightrect(1) + rightInd;
+leftPixel = leftrect(1) +leftInd;
+pixelWidth = rightPixel - leftPixel;
+pixelConversionFactor = knownReferenceDistance/pixelWidth;
+initialLiquidHeight = pixelHeight * pixelConversionFactor;
+end 
+ 
+function [edgeImages] = edgeImageCell(theImages)
+nImages = length(theImages);
+for i = 1:nImages
+    edgeImages{i} = edge(theImages{i},'Canny',[.2 .6]);
+end
+edgeImages = edgeImages';
+ 
+end
+ 
+function pixelConversionFactor = getPixelConversion(edgeImage,knownReferenceDistance)
+% finds the pixel conversion factor of an image by using two crop cuts.
+fig1 = figure('Name','getPixelConversion: Select left line to analyze (first line going from left will be used).','NumberTitle','off');
+[~,leftrect] = imcrop(edgeImage);
+close(fig1)
+ 
+fig1 = figure('Name','getPixelConversion: Select right line area to analyze (first line going from left will be used).','NumberTitle','off');
+[~,rightrect] = imcrop(edgeImage);
+close(fig1)
+leftrect = round(leftrect);
+rightrect = round(rightrect);
+leftline = imcrop(edgeImage,leftrect);
+rightline = imcrop(edgeImage,rightrect);
+[~,leftInd] = find(leftline(1,:)~=0);
+[~,rightInd] = find(rightline(1,:)~=0);
+pixelWidth = rightrect(1)+rightInd(1) - leftrect(1)+leftInd(1);
+pixelConversionFactor = knownReferenceDistance/pixelWidth;
+end
+ 
+function pixelHeight = getPixelHeight(croppedImages)
+%% Finds the pixelheight of the meniscus reletive to the initial meniscus height.
+nImages = length(croppedImages);
+props = regionprops(true(size(croppedImages{1})), croppedImages{1}, 'WeightedCentroid');
+verticalCentroidFirst = props.WeightedCentroid(2);
+for i = 1:nImages
+   props = regionprops(true(size(croppedImages{i})), croppedImages{i}, 'WeightedCentroid');
+   verticalCentroid = props.WeightedCentroid(2);
+   pixelHeight(i) = verticalCentroid - verticalCentroidFirst;
+end
+pixelHeight = -pixelHeight;
+% interpolate out the NaN entries
+xvals = 1:1:length(pixelHeight);
+pixelHeight = interp1(xvals,pixelHeight,xvals,'makima');
+pixelHeight = pixelHeight';
+end
+ 
+function [angleToRotate,rotatedImages] = autoRotateImageCell(theImages)
+%% Calculates the angle of corrrection using the first frame and then applies it to the rest of the images.
+% Calculate the angle of corrrection using the first frame
+nImages = length(theImages);
+fig1 = figure('Name','autoRotateImageCell: Select area to analyze (left-most line will be analyzed).','NumberTitle','off');
+[croppedImage,rect] = imcrop(theImages{1});
+close(fig1)
+% get the first line in first row
+[~,topInd] = find(croppedImage(1,:)~=0);
+topInd = topInd(1);
+% get the first line in last row
+[~,bottomInd] = find(croppedImage(end,:)~=0);
+bottomInd = bottomInd(1);
+% get the height of the two reference points
+verticalDist = length(croppedImage(:,1));
+% calculate angle of correction
+if bottomInd == topInd
+    angleToRotate = 0;
+elseif bottomInd < topInd
+    angleToRotate = atand((topInd-bottomInd)/verticalDist);
+elseif bottomInd > topInd
+    angleToRotate = -atand((bottomInd-topInd)/verticalDist);
+end
+% Apply rotation to images.
+for i = 1:nImages
+    rotatedImages{i} = imrotate(theImages{i},angleToRotate);
+end
+rotatedImages = rotatedImages';
+ 
+end
+ 
+function[rectCrop,croppedImages] = autoCropImageCell(theImages)
+ 
+nImages = length(theImages);
+fig1 = figure('Name','autoCropImageCell: Select the area to analyze (meniscus & capillary).','NumberTitle','off');
+[~,rect] = imcrop(theImages{1});
+close(fig1)
+rect = round(rect);
+firstImage = theImages{1};
+ 
+for i = 1:nImages
+    croppedImages{i} = imcrop(theImages{i},rect);
+end
+croppedImages = croppedImages';
+rectCrop = rect;
+end
+
+
